@@ -36,12 +36,24 @@ def reconcile_one(permit_code: str, authorization: AuthHeader = None):
         return _reconcile_permit(conn, permit_code)
 
 
+def _sludge_backed(conn, sample_id: int) -> bool:
+    """同源联查：采样批次所属处理厂是否已有污泥消化仓排程行（仓位计划背书）。"""
+    row = conn.execute(
+        """SELECT j.id FROM sludge_plan_jobs j
+           JOIN outfalls o ON o.plant_id=j.plant_id
+           JOIN sample_batches s ON s.outfall_id=o.id
+           WHERE s.id=? AND j.status='排队' LIMIT 1""",
+        (sample_id,),
+    ).fetchone()
+    return row is not None
+
+
 def _reconcile_permit(conn, permit_code: str) -> dict:
     permit = conn.execute(
         "SELECT * FROM discharge_permits WHERE permit_code=?", (permit_code,)
     ).fetchone()
     samples = conn.execute(
-        """SELECT sample_code, flow_m3h, metrics, status, generation FROM sample_batches
+        """SELECT id, sample_code, flow_m3h, metrics, status, generation FROM sample_batches
            WHERE permit_ref=? AND status NOT IN ('作废')""",
         (permit_code,),
     ).fetchall()
@@ -59,6 +71,7 @@ def _reconcile_permit(conn, permit_code: str) -> dict:
     }
     details = []
     all_ok = True
+    released_count = 0
     for s in samples:
         metrics = json.loads(s["metrics"] or "{}")
         ok = validate_permit_match(
@@ -66,6 +79,16 @@ def _reconcile_permit(conn, permit_code: str) -> dict:
         )
         if not ok:
             all_ok = False
+        backed = _sludge_backed(conn, s["id"])
+        formal = conn.execute(
+            """SELECT id FROM discharge_releases
+               WHERE sample_id=? AND status='已准排'""",
+            (s["id"],),
+        ).fetchone()
+        # 对账口径：只认有仓位计划背书的正式准排；影子意图/无背书行不得标已准排
+        released = bool(formal) and backed
+        if released:
+            released_count += 1
         details.append(
             {
                 "sample_code": s["sample_code"],
@@ -74,6 +97,8 @@ def _reconcile_permit(conn, permit_code: str) -> dict:
                 "metrics": metrics,
                 "flow_m3h": s["flow_m3h"],
                 "matched": ok,
+                "released": released,
+                "sludge_backed": backed,
             }
         )
     seal_rows = conn.execute(
@@ -89,6 +114,7 @@ def _reconcile_permit(conn, permit_code: str) -> dict:
         "balanced": all_ok,
         "proof_ready": all_ok and len(seal_rows) >= 1,
         "seal_count": len(seal_rows),
+        "released_count": released_count,
         "samples": details,
         "seals": [dict(x) for x in seal_rows],
     }
@@ -116,11 +142,17 @@ def proof_sample(sample_code: str, authorization: AuthHeader = None):
         ).fetchall()
         open_holds = [h for h in holds if h["status"] == "开放"]
         closed = [h for h in holds if h["status"] == "已关闭"]
+        backed = _sludge_backed(conn, sample["id"])
+        formal = [r for r in releases if r["status"] == "已准排"]
+        shadow = [r for r in releases if r["status"] == "影子意图"]
         return {
             "sample_code": sample_code,
             "status": sample["status"],
             "generation": sample["generation"],
-            "released": any(r["status"] == "已准排" for r in releases),
+            # 对账口径：只认有仓位计划背书的正式准排，未升正意图不得标已准排
+            "released": bool(formal) and backed,
+            "sludge_backed": backed,
+            "shadow_intents": len(shadow),
             "sealed": any(s["status"] == "已封批" for s in seals),
             "exceed_closed": len(open_holds) == 0 and (len(closed) > 0 or sample["status"] != "旁路挂起"),
             "holds": [dict(h) for h in holds],

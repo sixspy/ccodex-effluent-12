@@ -2,13 +2,15 @@ export const outfallsViewTemplate = `
   <div class="grid-2">
     <div class="panel">
       <h3>排放口限值</h3>
+      <p class="muted">仓位计划唯一起源：污泥消化仓排程行；处理厂设计量不得顶替仓位计划。</p>
       <table>
-        <thead><tr><th>编码</th><th>厂</th><th>河段</th><th>COD</th><th>氨氮</th><th>总磷</th><th>状态</th></tr></thead>
+        <thead><tr><th>编码</th><th>厂</th><th>河段</th><th>COD</th><th>氨氮</th><th>总磷</th><th>状态</th><th>消化仓排程</th></tr></thead>
         <tbody>
           <tr v-for="o in outfalls" :key="o.id">
             <td>{{ o.outfall_code }}</td><td>{{ o.plant_code }}</td><td>{{ o.river_reach }}</td>
             <td>{{ o.cod_limit }}</td><td>{{ o.nh3n_limit }}</td><td>{{ o.tp_limit }}</td>
             <td :class="statusClass(o.status)">{{ o.status }}</td>
+            <td :class="sludgeJobs.some(j => j.plant_id === o.plant_id && j.status === '排队') ? 'pass' : 'fail'">{{ sludgeJobs.some(j => j.plant_id === o.plant_id && j.status === '排队') ? ('排队×' + sludgeJobs.filter(j => j.plant_id === o.plant_id && j.status === '排队').length) : '空桩·禁准' }}</td>
           </tr>
         </tbody>
       </table>

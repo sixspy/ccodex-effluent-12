@@ -1,6 +1,8 @@
 """排放批争用锁。"""
 from __future__ import annotations
 
+import sqlite3
+
 from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user, require_writer
@@ -9,22 +11,38 @@ from db import connect, now_iso, write_audit
 router = APIRouter(tags=["locks"])
 
 
+def _record_contention(lock_key: str, actor: str, holder: str) -> None:
+    """争用痕独立落库：调用方事务回滚（如 409 拒写）也不得带走争用痕。"""
+    with connect() as conn:
+        conn.execute(
+            """INSERT INTO contention_log(lock_key,actor,action,detail,created_at)
+               VALUES (?,?,?,?,?)""",
+            (lock_key, actor, "争用失败", f"持有人={holder}", now_iso()),
+        )
+        conn.commit()
+
+
 def require_lock(conn, lock_key: str, holder: str) -> None:
     row = conn.execute(
         "SELECT holder FROM effluent_locks WHERE lock_key=?", (lock_key,)
     ).fetchone()
     if row and row["holder"] != holder:
-        conn.execute(
-            """INSERT INTO contention_log(lock_key,actor,action,detail,created_at)
-               VALUES (?,?,?,?,?)""",
-            (lock_key, holder, "争用失败", f"持有人={row['holder']}", now_iso()),
-        )
+        _record_contention(lock_key, holder, row["holder"])
         raise HTTPException(409, f"锁被占用：{lock_key} 持有人 {row['holder']}")
     if not row:
-        conn.execute(
-            "INSERT INTO effluent_locks(lock_key,holder,acquired_at) VALUES (?,?,?)",
-            (lock_key, holder, now_iso()),
-        )
+        try:
+            conn.execute(
+                "INSERT INTO effluent_locks(lock_key,holder,acquired_at) VALUES (?,?,?)",
+                (lock_key, holder, now_iso()),
+            )
+        except sqlite3.IntegrityError:
+            # 并发会话在本会话 SELECT 与 INSERT 之间抢先占锁（主键冲突即败方）
+            other = conn.execute(
+                "SELECT holder FROM effluent_locks WHERE lock_key=?", (lock_key,)
+            ).fetchone()
+            holder_now = other["holder"] if other else "未知"
+            _record_contention(lock_key, holder, holder_now)
+            raise HTTPException(409, f"锁被占用：{lock_key} 持有人 {holder_now}")
 
 
 def release(conn, lock_key: str, holder: str) -> None:

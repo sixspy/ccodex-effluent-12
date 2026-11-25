@@ -44,7 +44,24 @@ def get_outfall(outfall_id: int, authorization: AuthHeader = None):
                WHERE outfall_id=? ORDER BY id DESC LIMIT 10""",
             (outfall_id,),
         ).fetchall()
-        return {"outfall": dict(row), "recent_samples": [dict(s) for s in recent]}
+        # 仓位计划唯一起源：污泥消化仓排程行（sludge_plan_jobs），
+        # 不得以处理厂设计量 design_cap_m3d 顶替仓位计划。
+        plan_rows = conn.execute(
+            """SELECT id, digester_bay, mode, status, created_at FROM sludge_plan_jobs
+               WHERE plant_id=? ORDER BY id DESC""",
+            (row["plant_id"],),
+        ).fetchall()
+        scheduled = [dict(r) for r in plan_rows if r["status"] == "排队"]
+        return {
+            "outfall": dict(row),
+            "recent_samples": [dict(s) for s in recent],
+            "sludge_plan": {
+                "source": "sludge_plan_jobs",
+                "items": [dict(r) for r in plan_rows],
+                "scheduled_count": len(scheduled),
+                "bin_plan_ready": len(scheduled) > 0,
+            },
+        }
 
 
 @router.post("/api/outfalls")

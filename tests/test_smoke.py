@@ -56,6 +56,13 @@ def test_sample_exceed_release_seal_flow():
     )
     assert close.status_code == 200
     assert close.json()["sample_adjudicated"] is True
+    plan = c.post(
+        "/api/stubs/sludge-plan",
+        headers=h,
+        json={"plant_id": of["plant_id"], "digester_bay": "SD-FLOW", "mode": "enqueue"},
+    )
+    assert plan.status_code == 200
+    assert plan.json()["counts_as_plan"] is True
     release = c.post(
         "/api/releases",
         headers=h,
